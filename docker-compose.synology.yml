@@ -1,0 +1,121 @@
+# Company Brain — Synology DSM deployment.
+#
+# Usage on DSM (Container Manager):
+#   1. Copy this project to /volume1/docker/company-brain/
+#   2. Edit .env (see .env.example)
+#   3. In Container Manager: Project → Create → set path → Next → Build
+#      (or via SSH: `cd /volume1/docker/company-brain && sudo docker compose -f docker-compose.synology.yml up -d --build`)
+#
+# Data lives in /volume1/docker/company-brain/data/  — survives container rebuilds.
+# NAS shares are mounted READ-ONLY under /mnt/nas/<Share>/ inside the container.
+#
+# Resource caps below are sized for an 8 GB Synology (DS923+ class). Adjust for
+# your hardware.
+
+services:
+  backend:
+    build: ./backend
+    image: company-brain:latest
+    container_name: company-brain-backend
+    env_file: .env
+    environment:
+      - NAS_ROOT=/mnt/nas
+      - TZ=America/Los_Angeles
+    volumes:
+      - ./data:/app/data
+      # --- NAS shares (read-only). Comment out anything you don't want indexed.
+      - /volume1/Accounting:/mnt/nas/Accounting:ro
+      - /volume1/AI_RAG_Data:/mnt/nas/AI_RAG_Data:ro
+      - /volume1/All_Air_Users:/mnt/nas/All_Air_Users:ro
+      - /volume1/Common_Submittals:/mnt/nas/Common_Submittals:ro
+      - /volume1/Current_Bids:/mnt/nas/Current_Bids:ro
+      - /volume1/Employee Resources:/mnt/nas/Employee_Resources:ro
+      - /volume1/Estimation:/mnt/nas/Estimation:ro
+      - /volume1/Foremen Portal:/mnt/nas/Foremen_Portal:ro
+      - /volume1/Forms:/mnt/nas/Forms:ro
+      - /volume1/Inventory:/mnt/nas/Inventory:ro
+      - /volume1/Miscallaneous:/mnt/nas/Miscallaneous:ro
+      - /volume1/Office_Use_Only:/mnt/nas/Office_Use_Only:ro
+      - /volume1/Projects:/mnt/nas/Projects:ro
+      - /volume1/Service Tech Portal:/mnt/nas/Service_Tech_Portal:ro
+      - /volume1/Service_Dept:/mnt/nas/Service_Dept:ro
+      - /volume1/Trial-1:/mnt/nas/Trial-1:ro
+      # The noisy ones — uncomment only if you want them indexed:
+      # - /volume1/home:/mnt/nas/home:ro
+      # - /volume1/homes:/mnt/nas/homes:ro
+      # - /volume1/NetBackup:/mnt/nas/NetBackup:ro
+      # - /volume1/ActiveBackupforBusiness:/mnt/nas/ActiveBackupforBusiness:ro
+      # - /volume1/Scripts:/mnt/nas/Scripts:ro
+      # - /volume1/web:/mnt/nas/web:ro
+      # - /volume1/RemotDrive:/mnt/nas/RemotDrive:ro
+      # - /volume1/Vulacan Desktop-140:/mnt/nas/Vulacan_Desktop-140:ro
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1024M }
+        reservations: { cpus: "0.25", memory: 256M }
+    networks: [brain]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    # Same image — different command. Keeps indexing CPU away from the API.
+    image: company-brain:latest
+    depends_on:
+      backend: { condition: service_started }
+    container_name: company-brain-worker
+    env_file: .env
+    environment:
+      - NAS_ROOT=/mnt/nas
+      - TZ=America/Los_Angeles
+    volumes:
+      # Same read-only mounts as backend (must see the same tree)
+      - ./data:/app/data
+      - /volume1/Accounting:/mnt/nas/Accounting:ro
+      - /volume1/AI_RAG_Data:/mnt/nas/AI_RAG_Data:ro
+      - /volume1/All_Air_Users:/mnt/nas/All_Air_Users:ro
+      - /volume1/Common_Submittals:/mnt/nas/Common_Submittals:ro
+      - /volume1/Current_Bids:/mnt/nas/Current_Bids:ro
+      - /volume1/Employee Resources:/mnt/nas/Employee_Resources:ro
+      - /volume1/Estimation:/mnt/nas/Estimation:ro
+      - /volume1/Foremen Portal:/mnt/nas/Foremen_Portal:ro
+      - /volume1/Forms:/mnt/nas/Forms:ro
+      - /volume1/Inventory:/mnt/nas/Inventory:ro
+      - /volume1/Miscallaneous:/mnt/nas/Miscallaneous:ro
+      - /volume1/Office_Use_Only:/mnt/nas/Office_Use_Only:ro
+      - /volume1/Projects:/mnt/nas/Projects:ro
+      - /volume1/Service Tech Portal:/mnt/nas/Service_Tech_Portal:ro
+      - /volume1/Service_Dept:/mnt/nas/Service_Dept:ro
+      - /volume1/Trial-1:/mnt/nas/Trial-1:ro
+    command: ["python", "scripts/extract_worker.py"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        # Tight cap so the indexer can't choke DSM. Raise once you're comfortable.
+        limits: { cpus: "2.0", memory: 2048M }
+        reservations: { cpus: "0.5", memory: 512M }
+    networks: [brain]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE: /api
+    container_name: company-brain-frontend
+    depends_on: [backend]
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M }
+    networks: [brain]
+
+networks:
+  brain:
+    driver: bridge

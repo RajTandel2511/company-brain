@@ -1,0 +1,31 @@
+services:
+  backend:
+    build: ./backend
+    container_name: company-brain-backend
+    env_file: .env
+    environment:
+      - NAS_ROOT=/mnt/nas
+    volumes:
+      # Synology host path -> container path (READ ONLY)
+      # Change left side to your actual NAS share, e.g. /volume1/projects
+      - /volume1/projects:/mnt/nas:ro
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    restart: unless-stopped
+    networks: [brain]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE: /api
+    container_name: company-brain-frontend
+    depends_on: [backend]
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    restart: unless-stopped
+    networks: [brain]
+
+networks:
+  brain:
+    driver: bridge

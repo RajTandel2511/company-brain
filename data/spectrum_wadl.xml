@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<application xmlns="http://wadl.dev.java.net/2009/02">
+    <doc xmlns:jersey="http://jersey.java.net/" jersey:generatedBy="Jersey: 2.33 2020-12-18 07:19:04"/>
+    <grammars/>
+    <resources base="https://allairmechanical.dexterchaney.com/">
+        <resource path="ws">
+            <method id="proxyAllSoapRequests" name="POST">
+                <request>
+                    <param xmlns:xs="http://www.w3.org/2001/XMLSchema" name="soapAction" style="header" type="xs:string"/>
+                </request>
+                <response>
+                    <representation mediaType="*/*"/>
+                </response>
+            </method>
+        </resource>
+    </resources>
+</application>
