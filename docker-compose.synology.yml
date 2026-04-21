@@ -54,10 +54,7 @@ services:
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     restart: unless-stopped
-    deploy:
-      resources:
-        limits: { cpus: "1.0", memory: 1024M }
-        reservations: { cpus: "0.25", memory: 256M }
+    mem_limit: 1024m
     networks: [brain]
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://localhost:8000/api/health"]
@@ -96,11 +93,7 @@ services:
       - /volume1/Trial-1:/mnt/nas/Trial-1:ro
     command: ["python", "scripts/extract_worker.py"]
     restart: unless-stopped
-    deploy:
-      resources:
-        # Tight cap so the indexer can't choke DSM. Raise once you're comfortable.
-        limits: { cpus: "2.0", memory: 2048M }
-        reservations: { cpus: "0.5", memory: 512M }
+    mem_limit: 2048m
     networks: [brain]
 
   rag_worker:
@@ -122,10 +115,7 @@ services:
       - ./data:/app/data
     command: ["python", "scripts/build_rag.py"]
     restart: unless-stopped
-    deploy:
-      resources:
-        limits: { cpus: "2.0", memory: 1536M }
-        reservations: { cpus: "0.25", memory: 384M }
+    mem_limit: 1536m
     networks: [brain]
 
   frontend:
@@ -138,9 +128,7 @@ services:
     ports:
       - "${FRONTEND_PORT:-8080}:80"
     restart: unless-stopped
-    deploy:
-      resources:
-        limits: { cpus: "0.25", memory: 128M }
+    mem_limit: 128m
     networks: [brain]
 
 networks:
