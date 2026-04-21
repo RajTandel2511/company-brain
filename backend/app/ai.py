@@ -19,7 +19,7 @@ import urllib.request
 
 from anthropic import Anthropic
 
-from . import cache, spectrum_knowledge
+from . import cache, rag, spectrum_knowledge
 from .config import settings
 from .db import list_tables, run_query, UnsafeSQLError
 
@@ -335,19 +335,87 @@ def nl_to_sql(question: str) -> dict[str, Any]:
     return _anthropic_nl_to_sql(question)
 
 
-def summarize(question: str, sql: str, result: dict[str, Any]) -> str:
+def _format_rag_context(chunks: list[dict]) -> str:
+    """Render RAG hits as a block for the summariser. Trims each snippet so
+    the prompt stays cheap; the full chunk still ships as a citation."""
+    if not chunks:
+        return ""
+    lines = ["Related document excerpts (from the NAS):"]
+    for i, ch in enumerate(chunks, 1):
+        snippet = ch.get("snippet", "")
+        if len(snippet) > 500:
+            snippet = snippet[:500].rsplit(" ", 1)[0] + "…"
+        lines.append(f"[{i}] {ch.get('name','?')} — {snippet}")
+    return "\n".join(lines)
+
+
+def summarize(
+    question: str,
+    sql: str,
+    result: dict[str, Any],
+    rag_chunks: list[dict] | None = None,
+) -> str:
     preview_rows = result["rows"][:30]
-    prompt = (
-        f"User asked: {question}\n\n"
-        f"SQL run:\n{sql}\n\n"
-        f"Returned {len(result['rows'])} rows (columns: {', '.join(result['columns'])}).\n"
-        f"Sample rows: {preview_rows}\n\n"
+    parts = [
+        f"User asked: {question}",
+        "",
+        f"SQL run:\n{sql}",
+        "",
+        f"Returned {len(result['rows'])} rows (columns: {', '.join(result['columns'])}).",
+        f"Sample rows: {preview_rows}",
+    ]
+    ctx = _format_rag_context(rag_chunks or [])
+    if ctx:
+        parts += ["", ctx, "", "If a document excerpt directly answers part of the question, cite it by bracket number."]
+    parts += [
+        "",
         "Give a crisp, executive-ready answer in 2-4 sentences. "
-        "Highlight numbers and names. No fluff."
-    )
+        "Highlight numbers and names. No fluff.",
+    ]
+    prompt = "\n".join(parts)
     if settings.llm_provider == "ollama":
         return _ollama_summarize(prompt)
     return _anthropic_summarize(prompt)
+
+
+def _answer_from_rag(question: str, chunks: list[dict]) -> str:
+    """Fallback answer when SQL fails or is irrelevant — grounded in RAG alone."""
+    if not chunks:
+        return "I couldn't find SQL or document context relevant to that question."
+    parts = [
+        f"User asked: {question}",
+        "",
+        _format_rag_context(chunks),
+        "",
+        "Answer in 2-4 sentences using ONLY the excerpts above. Cite by bracket number. "
+        "If the excerpts don't directly address the question, say so plainly.",
+    ]
+    prompt = "\n".join(parts)
+    if settings.llm_provider == "ollama":
+        return _ollama_summarize(prompt)
+    return _anthropic_summarize(prompt)
+
+
+def _rag_chunks_as_citations(chunks: list[dict]) -> list[dict]:
+    """Shape RAG hits to the same citation contract the frontend expects."""
+    out: list[dict] = []
+    seen: set[int] = set()
+    for ch in chunks:
+        fid = ch.get("file_id")
+        if fid in seen:
+            continue
+        seen.add(fid)
+        out.append({
+            "file_id": fid,
+            "path": ch.get("path"),
+            "name": ch.get("name"),
+            "size": ch.get("size"),
+            "modified": ch.get("modified"),
+            "entity_type": "semantic",
+            "entity_value": f"score {ch.get('score', 0):.2f}",
+            "match": "semantic",
+        })
+    return out
 
 
 def answer_question(question: str) -> dict[str, Any]:
@@ -356,25 +424,53 @@ def answer_question(question: str) -> dict[str, Any]:
         "schema": _schema_hash(),
         "provider": settings.llm_provider,
         "model": settings.anthropic_model if settings.llm_provider == "anthropic" else settings.ollama_model,
+        "rag": "v1",
     }
     cached = cache.get(cache_parts)
     if cached is not None:
         cached["cached"] = True
         return cached
 
+    # RAG runs regardless of SQL success so documents can answer even when
+    # the NL->SQL step gets the schema wrong.
+    try:
+        rag_chunks = rag.search(question, limit=5)
+    except Exception:
+        rag_chunks = []
+
     plan = nl_to_sql(question)
+    result: dict[str, Any] | None = None
+    sql_error: str | None = None
     try:
         result = run_query(plan["sql"])
     except UnsafeSQLError as e:
-        return {"error": f"unsafe_sql: {e}", "plan": plan}
+        sql_error = f"unsafe_sql: {e}"
+    except Exception as e:
+        # Most common: pyodbc.ProgrammingError from a column the LLM hallucinated.
+        # Surface the SQL and the DB message instead of 500-ing the request.
+        sql_error = str(e).splitlines()[0][:500]
 
-    summary_text = summarize(question, plan["sql"], result)
-    citations = _find_citations(result)
+    if result is not None:
+        summary_text = summarize(question, plan["sql"], result, rag_chunks)
+        sql_citations = _find_citations(result)
+    else:
+        summary_text = _answer_from_rag(question, rag_chunks)
+        sql_citations = []
+
+    # Merge: prefer entity matches first (more specific), then top RAG hits,
+    # deduplicated by file_id. Cap at 12 so the UI list stays readable.
+    seen_ids = {c["file_id"] for c in sql_citations if c.get("file_id") is not None}
+    rag_citations = [c for c in _rag_chunks_as_citations(rag_chunks)
+                     if c["file_id"] not in seen_ids]
+    citations = (sql_citations + rag_citations)[:12]
+
     out = {
         "plan": plan,
-        "result": result,
+        "result": result or {"columns": [], "rows": [], "truncated": False},
         "summary": summary_text,
         "citations": citations,
+        "sql_error": sql_error,
+        "rag_hits": len(rag_chunks),
         "cached": False,
     }
     cache.set_(cache_parts, out)

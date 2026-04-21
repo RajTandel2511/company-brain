@@ -14,4 +14,5 @@ Thumbs.db
 .idea/
 data/*.sqlite
 data/*.sqlite-*
+.claude/
 

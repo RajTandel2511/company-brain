@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from . import ai, di, docintel, files, insights, jobs, money, nas_index
+from . import ai, di, docintel, files, insights, jobs, money, nas_index, rag
 from .config import settings
 from .db import describe_table, list_tables, run_query, UnsafeSQLError
 
@@ -186,6 +186,17 @@ def docintel_search(q: str, limit: int = 50):
         {"path": r[0], "name": r[1], "size": r[2], "modified": r[3], "text_length": r[4]}
         for r in rows
     ]
+
+
+@app.get("/api/rag/stats")
+def rag_stats():
+    return rag.stats()
+
+
+@app.get("/api/rag/search")
+def rag_search(q: str, limit: int = 10):
+    """Semantic search over indexed NAS document chunks."""
+    return {"query": q, "results": rag.search(q, limit=limit)}
 
 
 @app.get("/api/insights")

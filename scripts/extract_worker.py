@@ -17,7 +17,7 @@ load_dotenv(".env")
 from app import docintel
 
 BATCH = 200
-WORKERS = 6          # threads per batch — set 4-8 based on your CPU
+WORKERS = 8          # sweet spot — more threads saturate SMB and hurt throughput
 IDLE_SLEEP = 120     # seconds to wait when no work is pending
 
 print("Document intelligence worker starting…", flush=True)
