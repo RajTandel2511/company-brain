@@ -138,6 +138,11 @@ def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
 # --- storage ----------------------------------------------------------------
 
 def _connect() -> sqlite3.Connection:
+    # Ensure docintel's schema exists in the shared DB. On a fresh deploy
+    # the RAG worker can start before the extractor has created
+    # file_content / file_entities, and our queries need those tables.
+    docintel._connect().close()
+
     c = sqlite3.connect(docintel.DB, timeout=30)
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA busy_timeout=30000")
