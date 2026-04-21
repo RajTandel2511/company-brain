@@ -259,7 +259,10 @@ def _get_anthropic() -> Anthropic:
     return _anthropic
 
 
-def _anthropic_nl_to_sql(question: str) -> dict[str, Any]:
+def _anthropic_nl_to_sql(question: str, prior: dict | None = None) -> dict[str, Any]:
+    """NL→SQL via Claude. When `prior` is set we're retrying — the previous
+    SQL and its DB error go in as additional context so the model can fix
+    the exact column/table it got wrong."""
     system_blocks = [
         {"type": "text", "text": SYSTEM_PROMPT},
         {
@@ -268,11 +271,20 @@ def _anthropic_nl_to_sql(question: str) -> dict[str, Any]:
             "cache_control": {"type": "ephemeral"},
         },
     ]
+    messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
+    if prior:
+        messages.append({"role": "assistant", "content":
+            f"<reasoning>{prior.get('reasoning','')}</reasoning>\n"
+            f"<sql>{prior.get('sql','')}</sql>"})
+        messages.append({"role": "user", "content":
+            f"That query failed with this error:\n{prior.get('error','')}\n\n"
+            "Rewrite the SQL. Common causes: hallucinated column, wrong table, "
+            "missing Company_Code filter. Emit the same <reasoning>/<sql> XML format."})
     resp = _get_anthropic().messages.create(
         model=settings.anthropic_model,
         max_tokens=1024,
         system=system_blocks,
-        messages=[{"role": "user", "content": question}],
+        messages=messages,
     )
     text = "".join(b.text for b in resp.content if b.type == "text")
     reasoning, sql = _parse(text)
@@ -316,9 +328,17 @@ def _ollama_chat(system: str, user: str, max_tokens: int = 1024) -> str:
     return data.get("message", {}).get("content", "")
 
 
-def _ollama_nl_to_sql(question: str) -> dict[str, Any]:
+def _ollama_nl_to_sql(question: str, prior: dict | None = None) -> dict[str, Any]:
     system = SYSTEM_PROMPT + "\n\n" + _schema_snapshot()
-    text = _ollama_chat(system, question, max_tokens=1024)
+    user = question
+    if prior:
+        user = (
+            f"{question}\n\n"
+            f"Previous attempt failed:\n<sql>{prior.get('sql','')}</sql>\n"
+            f"Error: {prior.get('error','')}\n"
+            "Rewrite the SQL using the schema above. Same XML output format."
+        )
+    text = _ollama_chat(system, user, max_tokens=1024)
     reasoning, sql = _parse(text)
     return {"reasoning": reasoning, "sql": sql, "model": settings.ollama_model, "usage": {}}
 
@@ -329,10 +349,10 @@ def _ollama_summarize(prompt: str) -> str:
 
 # ---- Public API ----------------------------------------------------------
 
-def nl_to_sql(question: str) -> dict[str, Any]:
+def nl_to_sql(question: str, prior: dict | None = None) -> dict[str, Any]:
     if settings.llm_provider == "ollama":
-        return _ollama_nl_to_sql(question)
-    return _anthropic_nl_to_sql(question)
+        return _ollama_nl_to_sql(question, prior=prior)
+    return _anthropic_nl_to_sql(question, prior=prior)
 
 
 def _format_rag_context(chunks: list[dict]) -> str:
@@ -441,14 +461,42 @@ def answer_question(question: str) -> dict[str, Any]:
     plan = nl_to_sql(question)
     result: dict[str, Any] | None = None
     sql_error: str | None = None
-    try:
-        result = run_query(plan["sql"])
-    except UnsafeSQLError as e:
-        sql_error = f"unsafe_sql: {e}"
-    except Exception as e:
-        # Most common: pyodbc.ProgrammingError from a column the LLM hallucinated.
-        # Surface the SQL and the DB message instead of 500-ing the request.
-        sql_error = str(e).splitlines()[0][:500]
+    retried = False
+
+    def _exec(p: dict) -> tuple[dict | None, str | None]:
+        try:
+            return run_query(p["sql"]), None
+        except UnsafeSQLError as e:
+            return None, f"unsafe_sql: {e}"
+        except Exception as e:
+            # Most common: pyodbc.ProgrammingError from a column the LLM
+            # hallucinated. Surface the DB message instead of 500-ing.
+            return None, str(e).splitlines()[0][:500]
+
+    result, sql_error = _exec(plan)
+
+    # One-shot self-correction: feed the error back to the LLM and let it
+    # rewrite the SQL. Fixes the common hallucinated-column case cleanly.
+    if sql_error and not sql_error.startswith("unsafe_sql"):
+        try:
+            plan2 = nl_to_sql(question, prior={
+                "reasoning": plan.get("reasoning", ""),
+                "sql": plan.get("sql", ""),
+                "error": sql_error,
+            })
+            retried = True
+            r2, e2 = _exec(plan2)
+            if r2 is not None:
+                # The retry worked — promote it to the returned plan.
+                plan = plan2
+                result = r2
+                sql_error = None
+            else:
+                # Keep the first plan so the UI still shows the attempted SQL;
+                # record that we tried and failed twice.
+                sql_error = f"{sql_error} | retry: {e2}"
+        except Exception as retry_exc:
+            sql_error = f"{sql_error} | retry_failed: {retry_exc}"
 
     if result is not None:
         summary_text = summarize(question, plan["sql"], result, rag_chunks)
@@ -470,6 +518,7 @@ def answer_question(question: str) -> dict[str, Any]:
         "summary": summary_text,
         "citations": citations,
         "sql_error": sql_error,
+        "sql_retried": retried,
         "rag_hits": len(rag_chunks),
         "cached": False,
     }
