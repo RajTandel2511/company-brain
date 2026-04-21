@@ -239,6 +239,90 @@ def rebuild() -> dict:
     }
 
 
+def refresh_incremental(seen_ceiling: int = 0) -> dict:
+    """Walk the NAS and add any paths we haven't seen before, without
+    wiping the existing index. Cheap enough to run on a schedule: SMB
+    stat() calls dominate runtime, but INSERT OR IGNORE makes the DB
+    side a no-op for unchanged paths.
+
+    `seen_ceiling` is a safety cap on the total NAS size (defaults to
+    MAX_FILES from the full rebuild). Set higher explicitly if you've
+    outgrown it."""
+    start = time.time()
+    vendors, customers = _load_spectrum_codes()
+    c = _conn()
+    _schema(c)
+
+    root = Path(settings.nas_root)
+    cap = seen_ceiling or MAX_FILES
+    seen = 0
+    added = 0
+    tokens_added = 0
+    skipped = 0
+    cur = c.cursor()
+    cur.execute("BEGIN")
+    for entry in _walk(root):
+        try:
+            rel = str(entry.relative_to(root)).replace("\\", "/")
+        except ValueError:
+            continue
+        if not rel or rel == ".":
+            continue
+        try:
+            is_dir = entry.is_dir()
+            st = entry.stat()
+        except OSError:
+            skipped += 1
+            continue
+        try:
+            # Fast path: was the row already there? If so, skip the insert
+            # *and* the token recomputation — those are the expensive bits.
+            existing = cur.execute(
+                "SELECT id FROM files WHERE path = ?", (rel,)
+            ).fetchone()
+            if existing is None:
+                cur.execute(
+                    "INSERT OR IGNORE INTO files(path,name,is_dir,size,modified) "
+                    "VALUES (?,?,?,?,?)",
+                    (rel, entry.name, 1 if is_dir else 0,
+                     None if is_dir else st.st_size, st.st_mtime),
+                )
+                row = cur.execute("SELECT id FROM files WHERE path = ?",
+                                  (rel,)).fetchone()
+                if row:
+                    file_id = row[0]
+                    for ttype, tval in _tokens_for(entry.name, rel, vendors, customers):
+                        cur.execute(
+                            "INSERT OR IGNORE INTO tokens(token_type,token_value,file_id) "
+                            "VALUES (?,?,?)",
+                            (ttype, tval, file_id),
+                        )
+                        tokens_added += 1
+                    added += 1
+        except sqlite3.Error:
+            skipped += 1
+            continue
+        seen += 1
+        if seen % 20_000 == 0:
+            cur.execute("COMMIT")
+            cur.execute("BEGIN")
+        if seen >= cap:
+            break
+    cur.execute(
+        "REPLACE INTO meta(k,v) VALUES ('last_refresh', ?)",
+        (str(int(time.time())),),
+    )
+    cur.execute("COMMIT")
+    c.close()
+    return {
+        "files_seen": seen,
+        "files_added": added,
+        "tokens_added": tokens_added,
+        "skipped": skipped,
+        "elapsed_seconds": round(time.time() - start, 1),
+    }
+
+
 def ensure_built() -> None:
     if not DB.exists():
         rebuild()

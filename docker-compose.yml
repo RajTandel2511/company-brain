@@ -1,16 +1,49 @@
 services:
   backend:
     build: ./backend
+    image: company-brain:latest
     container_name: company-brain-backend
     env_file: .env
     environment:
       - NAS_ROOT=/mnt/nas
     volumes:
+      - ./data:/app/data
       # Synology host path -> container path (READ ONLY)
       # Change left side to your actual NAS share, e.g. /volume1/projects
       - /volume1/projects:/mnt/nas:ro
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+    restart: unless-stopped
+    networks: [brain]
+
+  worker:
+    image: company-brain:latest
+    depends_on:
+      backend: { condition: service_started }
+    container_name: company-brain-worker
+    env_file: .env
+    environment:
+      - NAS_ROOT=/mnt/nas
+    volumes:
+      - ./data:/app/data
+      - /volume1/projects:/mnt/nas:ro
+    command: ["python", "scripts/extract_worker.py"]
+    restart: unless-stopped
+    networks: [brain]
+
+  rag_worker:
+    image: company-brain:latest
+    depends_on:
+      backend: { condition: service_started }
+    container_name: company-brain-rag
+    env_file: .env
+    environment:
+      - NAS_ROOT=/mnt/nas
+      - HF_HOME=/app/data/hf
+      - FASTEMBED_CACHE_PATH=/app/data/hf/fastembed
+    volumes:
+      - ./data:/app/data
+    command: ["python", "scripts/build_rag.py"]
     restart: unless-stopped
     networks: [brain]
 

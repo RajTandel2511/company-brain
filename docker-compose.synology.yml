@@ -101,6 +101,31 @@ services:
         reservations: { cpus: "0.5", memory: 512M }
     networks: [brain]
 
+  rag_worker:
+    # Chunks + embeds extracted text into the vector index. No NAS mount
+    # needed — it only reads from docintel.sqlite under ./data.
+    image: company-brain:latest
+    depends_on:
+      backend: { condition: service_started }
+    container_name: company-brain-rag
+    env_file: .env
+    environment:
+      - NAS_ROOT=/mnt/nas
+      - TZ=America/Los_Angeles
+      # Cache the downloaded BGE model weights on the data volume so a
+      # container rebuild doesn't re-download them.
+      - HF_HOME=/app/data/hf
+      - FASTEMBED_CACHE_PATH=/app/data/hf/fastembed
+    volumes:
+      - ./data:/app/data
+    command: ["python", "scripts/build_rag.py"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 1536M }
+        reservations: { cpus: "0.25", memory: 384M }
+    networks: [brain]
+
   frontend:
     build:
       context: ./frontend
