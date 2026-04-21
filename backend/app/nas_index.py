@@ -26,9 +26,22 @@ from typing import Iterable
 from .config import settings
 from .db import run_query
 
-# Persistent data dir lives at the project root so the index survives reboots
-# and container restarts. In Synology deploy this gets mapped to a volume.
-DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+# Persistent data dir. Explicit env var wins; otherwise we probe for a
+# project root that has a `scripts/` sibling. This handles both the dev
+# layout (backend/app/nas_index.py next to scripts/ under Let's/) and the
+# Docker layout where backend/ is flattened and everything lives under /app.
+def _resolve_data_dir() -> Path:
+    override = os.environ.get("COMPANY_BRAIN_DATA_DIR")
+    if override:
+        return Path(override)
+    here = Path(__file__).resolve()
+    for p in (here.parents[2], here.parents[1]):
+        if (p / "scripts").is_dir():
+            return p / "data"
+    return here.parents[1] / "data"
+
+
+DATA_DIR = _resolve_data_dir()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB = DATA_DIR / "nas-index.sqlite"
 
