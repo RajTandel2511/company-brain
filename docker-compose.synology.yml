@@ -94,6 +94,9 @@ services:
     command: ["python", "scripts/extract_worker.py"]
     restart: unless-stopped
     mem_limit: 2048m
+    # Soft CPU priority — workers back off when DSM or the API need cycles.
+    # cpu_shares works on older kernels that refuse hard CFS caps.
+    cpu_shares: 256
     networks: [brain]
 
   rag_worker:
@@ -111,11 +114,15 @@ services:
       # container rebuild doesn't re-download them.
       - HF_HOME=/app/data/hf
       - FASTEMBED_CACHE_PATH=/app/data/hf/fastembed
+      # Cap ONNX runtime threads so embedding doesn't saturate DSM.
+      - OMP_NUM_THREADS=2
+      - ORT_NUM_THREADS=2
     volumes:
       - ./data:/app/data
     command: ["python", "scripts/build_rag.py"]
     restart: unless-stopped
     mem_limit: 1536m
+    cpu_shares: 256
     networks: [brain]
 
   frontend:

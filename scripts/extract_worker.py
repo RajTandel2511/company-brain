@@ -26,7 +26,11 @@ load_dotenv(".env")
 from app import docintel, nas_index
 
 BATCH = 200
-WORKERS = 8                  # sweet spot — more threads saturate SMB and hurt throughput
+# Thread count tuned for a shared Synology box. DSM itself needs headroom
+# for SMB / indexer / Drive, and the kernel here doesn't expose CFS cgroup
+# limits so this is the only real CPU ceiling we have. Override with the
+# EXTRACT_WORKERS env var if you want to push harder on a dedicated host.
+WORKERS = int(os.environ.get("EXTRACT_WORKERS", "3"))
 IDLE_SLEEP = 120             # seconds to wait when no work is pending
 REFRESH_EVERY_SECONDS = 6 * 3600  # incremental NAS walk cadence (6h)
 
