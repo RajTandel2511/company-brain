@@ -93,7 +93,9 @@ services:
       - /volume1/Trial-1:/mnt/nas/Trial-1:ro
     command: ["python", "scripts/extract_worker.py"]
     restart: unless-stopped
-    mem_limit: 2048m
+    # 4 GB headroom for the NAS walker — it buffers ~500K file rows
+    # before the first transaction commit and a 2 GB cap was getting hit.
+    mem_limit: 4096m
     # Soft CPU priority — workers back off when DSM or the API need cycles.
     # cpu_shares works on older kernels that refuse hard CFS caps.
     cpu_shares: 256
