@@ -10,8 +10,15 @@ Run with:
 """
 import os, sys, time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-os.chdir(Path(__file__).resolve().parents[1])
+
+# Dev layout: backend/app/ alongside scripts/. Docker layout: app/ alongside
+# scripts/ (backend/ is flattened into the image root). Probe both.
+_root = Path(__file__).resolve().parents[1]
+for _cand in (_root / "backend", _root):
+    if (_cand / "app").is_dir():
+        sys.path.insert(0, str(_cand))
+        break
+os.chdir(_root)
 
 from dotenv import load_dotenv
 load_dotenv(".env")

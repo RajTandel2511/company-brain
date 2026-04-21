@@ -14,7 +14,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 os.chdir(ROOT)
-sys.path.insert(0, str(ROOT / "backend"))
+# Dev has backend/app/, Docker has app/ at the root; probe both.
+for _cand in (ROOT / "backend", ROOT):
+    if (_cand / "app").is_dir():
+        sys.path.insert(0, str(_cand))
+        break
 
 from dotenv import load_dotenv
 load_dotenv(".env")

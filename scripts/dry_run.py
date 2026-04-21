@@ -12,8 +12,12 @@ Default share is `Current_Bids` (small, self-contained). To switch:
 import os, sys, time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-os.chdir(Path(__file__).resolve().parents[1])
+_root = Path(__file__).resolve().parents[1]
+for _cand in (_root / "backend", _root):
+    if (_cand / "app").is_dir():
+        sys.path.insert(0, str(_cand))
+        break
+os.chdir(_root)
 
 from dotenv import load_dotenv
 load_dotenv(".env")
