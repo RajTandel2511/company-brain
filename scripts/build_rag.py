@@ -8,6 +8,7 @@ Run with:
     python scripts/build_rag.py
 """
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -47,7 +48,17 @@ while True:
         continue
 
     t0 = time.time()
-    r = rag.index_files(ids)
+    try:
+        r = rag.index_files(ids)
+    except sqlite3.OperationalError as e:
+        # The extractor holds the write lock during big PDF batches. Rather
+        # than crashing (which restarts the whole container and reloads the
+        # 130MB ONNX model), wait it out and try again.
+        if "database is locked" in str(e):
+            print(f"  write lock busy, retrying in 30s…", flush=True)
+            time.sleep(30)
+            continue
+        raise
     elapsed = time.time() - t0
     rate = r["chunks_written"] / elapsed if elapsed else 0
     print(f"  batch: {r['files_processed']} files, {r['chunks_written']} chunks, "

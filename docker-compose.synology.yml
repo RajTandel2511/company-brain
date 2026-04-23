@@ -123,7 +123,7 @@ services:
       - ./data:/app/data
     command: ["python", "scripts/build_rag.py"]
     restart: unless-stopped
-    mem_limit: 1536m
+    mem_limit: 2560m
     cpu_shares: 256
     networks: [brain]
 

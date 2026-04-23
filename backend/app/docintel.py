@@ -11,6 +11,7 @@ last extraction are touched, so you can run it any time and it picks up.
 """
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import time
@@ -97,6 +98,17 @@ def _invoice_match_quality(inv: str) -> str:
 
 
 def _load_masters() -> dict:
+    # Allow running on environments without Spectrum connectivity (e.g. a
+    # cloud VM used for a one-time extraction burst). Entity tagging is
+    # skipped — the text content is still extracted, and entity matching
+    # can be re-run later by a machine that can reach Spectrum.
+    if os.environ.get("SKIP_SPECTRUM") == "1":
+        return {
+            "jobs": set(), "vendors": {}, "customers": {},
+            "pos": set(), "pos_strong": set(), "pos_weak": set(),
+            "ap_strong": set(), "ap_weak": set(), "ap_invoices": set(),
+        }
+
     CO = settings.spectrum_company_code
     jobs = {r["v"].strip() for r in run_query(
         f"SELECT LTRIM(RTRIM(Job_Number)) AS v FROM dbo.JC_JOB_MASTER_MC WHERE Company_Code='{CO}'"
@@ -490,8 +502,13 @@ def run(batch_limit: int = 500, progress_cb=None, workers: int | None = None) ->
                 )
                 entity_count += 1
             processed += 1
-            if processed % 50 == 0:
+            if processed % 20 == 0:
                 cur.execute("COMMIT")
+                # Yield the write lock so the RAG worker can slip in. Without
+                # this pause, COMMIT → BEGIN is microseconds apart and RAG
+                # starves out — busy_timeout doesn't help when the lock is
+                # held ~continuously.
+                time.sleep(0.5)
                 cur.execute("BEGIN")
                 if progress_cb:
                     progress_cb(processed, entity_count)

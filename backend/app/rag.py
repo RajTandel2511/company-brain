@@ -143,9 +143,9 @@ def _connect() -> sqlite3.Connection:
     # file_content / file_entities, and our queries need those tables.
     docintel._connect().close()
 
-    c = sqlite3.connect(docintel.DB, timeout=30)
+    c = sqlite3.connect(docintel.DB, timeout=120)
     c.execute("PRAGMA journal_mode=WAL")
-    c.execute("PRAGMA busy_timeout=30000")
+    c.execute("PRAGMA busy_timeout=120000")
     c.executescript("""
         CREATE TABLE IF NOT EXISTS chunks (
           id INTEGER PRIMARY KEY,
