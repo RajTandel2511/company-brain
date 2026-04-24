@@ -32,16 +32,24 @@ BATCH = 200
 # EXTRACT_WORKERS env var if you want to push harder on a dedicated host.
 WORKERS = int(os.environ.get("EXTRACT_WORKERS", "3"))
 IDLE_SLEEP = 120             # seconds to wait when no work is pending
-REFRESH_EVERY_SECONDS = 6 * 3600  # incremental NAS walk cadence (6h)
+REFRESH_EVERY_SECONDS = int(os.environ.get("REFRESH_EVERY_SECONDS", 6 * 3600))
+# When the NAS is mounted over high-latency SMB (e.g. Tailscale from a cloud
+# VM), the stat()-per-file walk can take hours. Set SKIP_NAS_REFRESH=1 so
+# the burst node only works through the existing index; newly-added files
+# get picked up later by the Synology on its next 6h refresh.
+SKIP_NAS_REFRESH = os.environ.get("SKIP_NAS_REFRESH") == "1"
 
 print("Document intelligence worker starting…", flush=True)
+if SKIP_NAS_REFRESH:
+    print("  SKIP_NAS_REFRESH=1 → skipping incremental walks this run", flush=True)
 last_refresh = 0.0
 
 while True:
     # Catch newly-arrived NAS files periodically. Cheap compared to a full
-    # rebuild because unchanged paths are an INSERT OR IGNORE no-op.
+    # rebuild because unchanged paths are an INSERT OR IGNORE no-op — unless
+    # the mount is slow, in which case SKIP_NAS_REFRESH disables this.
     now = time.time()
-    if now - last_refresh > REFRESH_EVERY_SECONDS:
+    if not SKIP_NAS_REFRESH and now - last_refresh > REFRESH_EVERY_SECONDS:
         print(f"[{time.strftime('%H:%M:%S')}] refreshing NAS index (incremental)…", flush=True)
         try:
             r = nas_index.refresh_incremental()
