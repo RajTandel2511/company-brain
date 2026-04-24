@@ -199,7 +199,13 @@ def _system_prompt() -> str:
         "- Use SQL Server T-SQL syntax.\n"
         "- Always include TOP N (default 200) unless the user asks for a specific count or aggregate.\n"
         "- Prefer the tables listed below. If the user's question is ambiguous, pick the most likely interpretation and proceed.\n"
-        "- Use JOINs conservatively; avoid SELECT *.\n\n"
+        "- Use JOINs conservatively; avoid SELECT *.\n"
+        "- CRITICAL — Spectrum stores code columns as fixed-width CHAR with padding (Job_Number "
+        "has LEADING spaces, Customer_Code / Vendor_Code / PO_Number / Invoice_Number have TRAILING spaces). "
+        "When filtering by a user-supplied code value, ALWAYS wrap the column in LTRIM(RTRIM(...)), "
+        "e.g. `WHERE LTRIM(RTRIM(Job_Number)) = '24.59'` — never bare `= '24.59'`. Same for IN () and LIKE. "
+        "Also trim whenever you SELECT, GROUP BY, or ORDER BY these columns so results don't carry whitespace. "
+        "Column equality in a JOIN between two Spectrum tables is fine (both sides are padded identically).\n"
         + spectrum_knowledge.render(settings.spectrum_company_code)
         + "\nOutput format — always emit exactly this XML structure:\n"
         "<reasoning>one short sentence on the plan</reasoning>\n"
@@ -445,6 +451,10 @@ def answer_question(question: str) -> dict[str, Any]:
         "provider": settings.llm_provider,
         "model": settings.anthropic_model if settings.llm_provider == "anthropic" else settings.ollama_model,
         "rag": "v1",
+        # Bump this whenever the NL->SQL system prompt changes so old cached
+        # (and likely wrong) SQL doesn't get served. Bumped to v2 when we
+        # added the LTRIM(RTRIM(...)) rule for Spectrum's padded code columns.
+        "prompt": "v2",
     }
     cached = cache.get(cache_parts)
     if cached is not None:
