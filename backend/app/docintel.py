@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sqlite3
 import time
 from pathlib import Path
@@ -27,6 +28,12 @@ from .db import run_query
 # Separate DB so docintel writes never contend with the NAS indexer's locks.
 # We look up file_id -> path via nas_index.DB when we need to open a file.
 DB = nas_index.DATA_DIR / "docintel.sqlite"
+
+
+# Surrogate codepoints (\ud800-\udfff) and NUL (\x00) are valid in Python str
+# but cannot be encoded as UTF-8 / stored in SQLite. PDFs with broken font
+# encodings sometimes produce them; strip before insert.
+_SQL_BAD_CHARS = re.compile(r"[\ud800-\udfff\x00]")
 
 
 def _connect() -> sqlite3.Connection:
@@ -427,6 +434,14 @@ def run(batch_limit: int = 500, progress_cb=None, workers: int | None = None) ->
     if workers is None:
         workers = min(8, max(2, (_os.cpu_count() or 4) // 2))
 
+    # When the NAS is mounted over a slow link (Tailscale-SMB on the GCP burst
+    # node), per-file SMB latency dominates extraction. EXTRACT_PREFETCH=1 turns
+    # on a bulk-copy step so we read each batch off SMB once into a local SSD
+    # cache, then extract from local — pure CPU, no network waiting.
+    prefetch = _os.environ.get("EXTRACT_PREFETCH") == "1"
+    prefetch_workers = int(_os.environ.get("EXTRACT_PREFETCH_WORKERS", "32"))
+    cache_dir = Path(_os.environ.get("EXTRACT_CACHE_DIR", "/tmp/extract-cache"))
+
     t0 = time.time()
     nas_index.ensure_built()
     masters = _load_masters()
@@ -467,10 +482,37 @@ def run(batch_limit: int = 500, progress_cb=None, workers: int | None = None) ->
     failed = 0
     root = Path(settings.nas_root)
 
+    # Bulk-prefetch the batch from NAS to local SSD if asked. Done in one pass
+    # with a wide thread pool so we saturate the network instead of trickling
+    # one file per worker thread during extraction.
+    cache_lookup: dict[int, Path] = {}
+    if prefetch and candidates:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        prefetch_t0 = time.time()
+
+        def _stage(args):
+            file_id, rel_path, _mtime, lname = args
+            ext = Path(lname).suffix
+            src = root / rel_path
+            dst = cache_dir / f"{file_id}{ext}"
+            try:
+                shutil.copy2(src, dst)
+                return file_id, dst
+            except Exception:
+                return file_id, None
+
+        with ThreadPoolExecutor(max_workers=prefetch_workers) as pool:
+            for fid, path in pool.map(_stage, candidates):
+                if path is not None:
+                    cache_lookup[fid] = path
+        elapsed = time.time() - prefetch_t0
+        hits = len(cache_lookup)
+        print(f"  prefetched {hits}/{len(candidates)} files in {elapsed:.1f}s", flush=True)
+
     def _task(args):
         file_id, rel_path, mtime, lname = args
         ext = Path(lname).suffix
-        full = root / rel_path
+        full = cache_lookup.get(file_id) or (root / rel_path)
         try:
             text, used = _extract_one(full, ext)
         except Exception:
@@ -488,19 +530,32 @@ def run(batch_limit: int = 500, progress_cb=None, workers: int | None = None) ->
                 failed += 1
                 continue
             text, used, ents = result
-            cur.execute(
-                "INSERT OR REPLACE INTO file_content(file_id,text,char_count,extracted_at,extractor) "
-                "VALUES (?,?,?,?,?)",
-                (file_id, (text[:50000] if text else None), len(text or ""), time.time(), used),
-            )
-            cur.execute("DELETE FROM file_entities WHERE file_id = ?", (file_id,))
-            for etype, eval, src in ents:
+            # PDFs with broken font CMaps occasionally produce text containing
+            # lone UTF-16 surrogate codepoints. SQLite's UTF-8 encoder can't
+            # store them and raises UnicodeEncodeError, which used to kill
+            # the entire batch transaction (and the worker process). Strip
+            # them — and NULs while we're at it — before insert.
+            safe_text = _SQL_BAD_CHARS.sub("", text)[:50000] if text else None
+            try:
                 cur.execute(
-                    "INSERT OR IGNORE INTO file_entities(file_id,entity_type,entity_value,source) "
-                    "VALUES (?,?,?,?)",
-                    (file_id, etype, eval, src),
+                    "INSERT OR REPLACE INTO file_content(file_id,text,char_count,extracted_at,extractor) "
+                    "VALUES (?,?,?,?,?)",
+                    (file_id, safe_text, len(text or ""), time.time(), used),
                 )
-                entity_count += 1
+                cur.execute("DELETE FROM file_entities WHERE file_id = ?", (file_id,))
+                for etype, eval, src in ents:
+                    cur.execute(
+                        "INSERT OR IGNORE INTO file_entities(file_id,entity_type,entity_value,source) "
+                        "VALUES (?,?,?,?)",
+                        (file_id, etype, eval, src),
+                    )
+                    entity_count += 1
+            except (UnicodeEncodeError, sqlite3.DataError) as e:
+                # Belt-and-suspenders: if cleaning missed something, drop the
+                # one file and keep the batch going instead of aborting.
+                print(f"  skip file_id={file_id} ({type(e).__name__}: {str(e)[:80]})", flush=True)
+                failed += 1
+                continue
             processed += 1
             if processed % 20 == 0:
                 cur.execute("COMMIT")
@@ -513,6 +568,15 @@ def run(batch_limit: int = 500, progress_cb=None, workers: int | None = None) ->
                 if progress_cb:
                     progress_cb(processed, entity_count)
     cur.execute("COMMIT")
+
+    # Reclaim the local cache so disk usage stays bounded. Done after COMMIT
+    # so a crash mid-batch can resume by re-fetching the same files (cheap).
+    if cache_lookup:
+        for path in cache_lookup.values():
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     # Update a simple meta marker for UI
     c.execute("""
