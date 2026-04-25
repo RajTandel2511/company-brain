@@ -49,6 +49,12 @@ services:
       - EXTRACT_PREFETCH=1
       - EXTRACT_PREFETCH_WORKERS=48
       - EXTRACT_CACHE_DIR=/var/cache/extract
+      # Skip the Tesseract+PyMuPDF OCR fallback during the burst — corrupt
+      # PDFs were hanging fitz.open() and one bad file would freeze a thread
+      # indefinitely, drowning the log in MuPDF spam. Text-based PDFs still
+      # extract via pypdf. After handoff, the Synology re-extracts the
+      # files that came back empty (no per-file timeout pressure there).
+      - SKIP_OCR=1
     volumes:
       - ./data:/app/data
       # NAS shares — SMB-mounted on the host. Same names as Synology so the

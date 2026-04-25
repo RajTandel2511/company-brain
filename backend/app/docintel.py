@@ -215,6 +215,15 @@ def extract_pdf_text(path: Path, max_pages: int = 25) -> tuple[str, str]:
     if len(text_layer.strip()) >= OCR_MIN_TEXT_CHARS:
         return text_layer, "pypdf"
 
+    # SKIP_OCR=1 short-circuits the Tesseract/PyMuPDF fallback. Used on the
+    # GCP burst node where corrupt PDFs occasionally hang fitz.open() for
+    # minutes (drowning the worker in MuPDF format-error spam) and where
+    # OCR is the workload bottleneck overall. Scanned PDFs return their
+    # (usually empty) text layer — Synology re-runs OCR on those after
+    # handoff, when there's no per-file timeout pressure.
+    if os.environ.get("SKIP_OCR") == "1":
+        return text_layer, "pypdf"
+
     # Fall back to OCR
     try:
         import fitz  # PyMuPDF
