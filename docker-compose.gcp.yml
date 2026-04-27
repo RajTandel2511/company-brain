@@ -27,10 +27,11 @@ services:
     environment:
       - NAS_ROOT=/mnt/nas
       - TZ=America/Los_Angeles
-      # 44 vCPU machine, Python GIL releases on OCR/C code, but SQLite writes
-      # serialize. 24 workers is the sweet spot — beyond this the commit lock
-      # becomes the bottleneck and extra threads just wait.
-      - EXTRACT_WORKERS=24
+      # 44 vCPU machine. With EXTRACT_USE_PROCESSES=1 each worker is its
+      # own Python process, so the GIL no longer caps total throughput at
+      # one core. 32 processes leaves ~12 cores free for the OS, the rag
+      # worker, and any extraction overhead.
+      - EXTRACT_WORKERS=32
       # Spectrum SQL is on the office LAN and not reachable from this cloud
       # VM. Skip master-data loading → entity tagging is bypassed during the
       # burst. The Synology re-tags existing files on handoff (fast, all
@@ -55,6 +56,12 @@ services:
       # extract via pypdf. After handoff, the Synology re-extracts the
       # files that came back empty (no per-file timeout pressure there).
       - SKIP_OCR=1
+      # With OCR off, extraction is pure-Python pypdf — Python's GIL pinned
+      # all 24 worker threads to a single core (CPU stuck at ~100%).
+      # ProcessPoolExecutor sidesteps the GIL: each worker is its own
+      # interpreter and gets its own CPU. 32 procs × ~500MB pypdf footprint
+      # ≈ 16 GB, comfortably within the 48 GB mem_limit.
+      - EXTRACT_USE_PROCESSES=1
     volumes:
       - ./data:/app/data
       # NAS shares — SMB-mounted on the host. Same names as Synology so the

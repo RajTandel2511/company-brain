@@ -431,13 +431,44 @@ def _extract_one(full_path: Path, ext: str) -> tuple[str, str]:
         return "", "failed"
 
 
+# --- ProcessPoolExecutor support -------------------------------------------
+# When extraction is pypdf-only (SKIP_OCR=1), the work is pure-Python and
+# the GIL serializes it across threads — 24 threads all share one core.
+# A process pool sidesteps the GIL: each process has its own interpreter
+# and can saturate a separate CPU core.
+#
+# The task function and its state must be picklable / module-level so
+# spawned processes can import them.
+
+_PROC_MASTERS: dict | None = None
+
+
+def _proc_init(masters_dict: dict) -> None:
+    """Per-process initializer: stash the masters dict in module scope so
+    each worker doesn't need to re-load it from Spectrum."""
+    global _PROC_MASTERS
+    _PROC_MASTERS = masters_dict
+
+
+def _proc_extract_task(args: tuple) -> tuple:
+    """Top-level task fn for ProcessPoolExecutor. Mirrors the closure-based
+    _task in run() but takes a fully-resolved path (no closures)."""
+    file_id, full_str, ext = args
+    try:
+        text, used = _extract_one(Path(full_str), ext)
+    except Exception:
+        return (file_id, None, "failed")
+    ents = entities_from_text(text, _PROC_MASTERS or {})
+    return (file_id, (text, used, ents), None)
+
+
 def run(batch_limit: int = 500, progress_cb=None, workers: int | None = None) -> dict:
     """Process up to `batch_limit` unprocessed files and extract + link.
 
     Extraction runs in parallel (thread pool). SQLite writes stay serial on the
     main thread. Supported: PDF (pypdf → OCR fallback), XLSX/XLSM, DOCX.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
     import os as _os
 
     if workers is None:
@@ -450,6 +481,12 @@ def run(batch_limit: int = 500, progress_cb=None, workers: int | None = None) ->
     prefetch = _os.environ.get("EXTRACT_PREFETCH") == "1"
     prefetch_workers = int(_os.environ.get("EXTRACT_PREFETCH_WORKERS", "32"))
     cache_dir = Path(_os.environ.get("EXTRACT_CACHE_DIR", "/tmp/extract-cache"))
+    # With OCR off, extraction is pure-Python pypdf which the GIL serializes
+    # across threads. EXTRACT_USE_PROCESSES=1 switches to ProcessPoolExecutor
+    # so each worker gets its own interpreter and can saturate its own CPU
+    # core. Default off — threads are fine when OCR is on (Tesseract drops
+    # the GIL in C code).
+    use_processes = _os.environ.get("EXTRACT_USE_PROCESSES") == "1"
 
     t0 = time.time()
     nas_index.ensure_built()
@@ -531,8 +568,30 @@ def run(batch_limit: int = 500, progress_cb=None, workers: int | None = None) ->
 
     cur = c.cursor()
     cur.execute("BEGIN")
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_task, item) for item in candidates]
+
+    if use_processes:
+        # Resolve every input to a concrete path + ext now, so the spawned
+        # processes don't need any closure state. The masters dict is loaded
+        # once per process via the initializer.
+        proc_args = []
+        for fid, rel_path, _mtime, lname in candidates:
+            ext = Path(lname).suffix
+            full = cache_lookup.get(fid) or (root / rel_path)
+            proc_args.append((fid, str(full), ext))
+        pool_ctx = ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_proc_init,
+            initargs=(masters,),
+        )
+        task_fn = _proc_extract_task
+        items_iter = proc_args
+    else:
+        pool_ctx = ThreadPoolExecutor(max_workers=workers)
+        task_fn = _task
+        items_iter = candidates
+
+    with pool_ctx as pool:
+        futures = [pool.submit(task_fn, item) for item in items_iter]
         for fut in as_completed(futures):
             file_id, result, err = fut.result()
             if err or result is None:
