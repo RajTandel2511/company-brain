@@ -188,14 +188,21 @@ def _unpack(blob: bytes) -> np.ndarray:
 # --- index build ------------------------------------------------------------
 
 def pending_file_ids(limit: int | None = None) -> list[int]:
-    """file_ids that have extracted text but no chunks yet."""
+    """file_ids that have extracted text but no chunks yet.
+
+    Filter out files whose extracted text is shorter than _MIN_CHUNK_CHARS:
+    chunk_text() can't produce any chunks from them, so they'd be requeued
+    on every iteration and starve every other pending file. Without this
+    floor, ~64 broken/near-empty PDFs pinned RAG at 0 throughput while
+    276k real files waited behind them.
+    """
     c = _connect()
-    q = """
+    q = f"""
         SELECT fc.file_id
         FROM file_content fc
         LEFT JOIN chunks ch ON ch.file_id = fc.file_id
         WHERE fc.text IS NOT NULL
-          AND fc.char_count > 0
+          AND fc.char_count >= {int(_MIN_CHUNK_CHARS)}
           AND ch.file_id IS NULL
         GROUP BY fc.file_id
     """
