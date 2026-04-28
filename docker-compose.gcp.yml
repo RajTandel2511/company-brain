@@ -104,14 +104,20 @@ services:
       - TZ=America/Los_Angeles
       - HF_HOME=/app/data/hf
       - FASTEMBED_CACHE_PATH=/app/data/hf/fastembed
-      # On the 88-core host we can give ONNX more threads for embeddings.
-      - OMP_NUM_THREADS=8
-      - ORT_NUM_THREADS=8
+      # 44-vCPU host. Worker is idle now (extraction done) so RAG can take
+      # most of the cores. ONNX embeds in C with internal parallelism, so
+      # one process with many threads beats multiple Python processes.
+      - OMP_NUM_THREADS=24
+      - ORT_NUM_THREADS=24
+      # Larger pull-from-DB batch reduces per-iteration overhead.
+      - RAG_BATCH_FILES=256
+      # Larger embed batch saturates ONNX better on a fat CPU.
+      - RAG_EMBED_BATCH=128
     volumes:
       - ./data:/app/data
     command: ["python", "scripts/build_rag.py"]
     restart: unless-stopped
-    mem_limit: 16g
+    mem_limit: 24g
     networks: [brain]
 
 networks:

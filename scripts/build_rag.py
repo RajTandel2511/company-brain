@@ -26,7 +26,8 @@ load_dotenv(".env")
 
 from app import rag
 
-BATCH_FILES = 64       # how many files to plan per iteration
+BATCH_FILES = int(os.environ.get("RAG_BATCH_FILES", "64"))   # files per iteration
+EMBED_BATCH = int(os.environ.get("RAG_EMBED_BATCH", "64"))   # chunks per embed call
 IDLE_SLEEP = 120       # seconds between passes when caught up
 
 print(f"RAG indexer starting — model={rag.MODEL_NAME}, dim={rag.EMBED_DIM}", flush=True)
@@ -49,7 +50,7 @@ while True:
 
     t0 = time.time()
     try:
-        r = rag.index_files(ids)
+        r = rag.index_files(ids, embed_batch=EMBED_BATCH)
     except sqlite3.OperationalError as e:
         # The extractor holds the write lock during big PDF batches. Rather
         # than crashing (which restarts the whole container and reloads the
