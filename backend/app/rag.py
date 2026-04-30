@@ -160,6 +160,20 @@ def _connect() -> sqlite3.Connection:
           k TEXT PRIMARY KEY, v TEXT
         );
 
+        -- Records every file_id we've fully considered for indexing, even
+        -- if chunk_text produced 0 chunks (e.g. PDFs whose OCR-skipped text
+        -- collapses below _MIN_CHUNK_CHARS after whitespace normalisation).
+        -- Without this, such files are re-pulled on every iteration and
+        -- pin the worker at 0 throughput.
+        CREATE TABLE IF NOT EXISTS rag_processed (
+          file_id INTEGER PRIMARY KEY
+        );
+
+        -- Backfill from any pre-existing chunks so files indexed before
+        -- this table existed don't get re-pulled.
+        INSERT OR IGNORE INTO rag_processed(file_id)
+          SELECT DISTINCT file_id FROM chunks;
+
         -- Contentless FTS5 mirror of chunks(text). We write to it manually
         -- after each insert so the index stays in lockstep without the
         -- overhead of triggers or a full-text content table duplicate.
@@ -188,23 +202,20 @@ def _unpack(blob: bytes) -> np.ndarray:
 # --- index build ------------------------------------------------------------
 
 def pending_file_ids(limit: int | None = None) -> list[int]:
-    """file_ids that have extracted text but no chunks yet.
+    """file_ids that have extracted text and haven't been processed yet.
 
-    Filter out files whose extracted text is shorter than _MIN_CHUNK_CHARS:
-    chunk_text() can't produce any chunks from them, so they'd be requeued
-    on every iteration and starve every other pending file. Without this
-    floor, ~64 broken/near-empty PDFs pinned RAG at 0 throughput while
-    276k real files waited behind them.
+    Joins against rag_processed (not chunks) so files we've already tried
+    but couldn't chunk — e.g. PDFs whose post-normalisation text is below
+    _MIN_CHUNK_CHARS — don't get re-pulled on every iteration.
     """
     c = _connect()
     q = f"""
         SELECT fc.file_id
         FROM file_content fc
-        LEFT JOIN chunks ch ON ch.file_id = fc.file_id
+        LEFT JOIN rag_processed rp ON rp.file_id = fc.file_id
         WHERE fc.text IS NOT NULL
           AND fc.char_count >= {int(_MIN_CHUNK_CHARS)}
-          AND ch.file_id IS NULL
-        GROUP BY fc.file_id
+          AND rp.file_id IS NULL
     """
     if limit:
         q += f" LIMIT {int(limit)}"
@@ -261,6 +272,14 @@ def index_files(file_ids: list[int], embed_batch: int = 64) -> dict:
         _fts_index(c, fts_rows)
         c.commit()
         chunks_written += len(rows)
+
+    # Mark every input file_id as processed — including the ones that
+    # produced 0 chunks — so they leave the pending set permanently.
+    c.executemany(
+        "INSERT OR IGNORE INTO rag_processed(file_id) VALUES (?)",
+        [(fid,) for fid in file_ids],
+    )
+    c.commit()
 
     c.close()
     return {
@@ -428,6 +447,16 @@ def stats() -> dict:
     n_chunks = c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
     n_files = c.execute("SELECT COUNT(DISTINCT file_id) FROM chunks").fetchone()[0]
     n_extracted = c.execute("SELECT COUNT(*) FROM file_content").fetchone()[0]
+    n_pending = c.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM file_content fc
+        LEFT JOIN rag_processed rp ON rp.file_id = fc.file_id
+        WHERE fc.text IS NOT NULL
+          AND fc.char_count >= {int(_MIN_CHUNK_CHARS)}
+          AND rp.file_id IS NULL
+        """
+    ).fetchone()[0]
     c.close()
     return {
         "model": MODEL_NAME,
@@ -435,7 +464,7 @@ def stats() -> dict:
         "chunks": n_chunks,
         "files_indexed": n_files,
         "files_extracted": n_extracted,
-        "files_pending": max(0, n_extracted - n_files),
+        "files_pending": n_pending,
         "chunk_size": CHUNK_SIZE,
         "chunk_overlap": CHUNK_OVERLAP,
     }
